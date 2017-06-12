@@ -1,7 +1,9 @@
 import os
 import sys
-
-sys.path.append(os.getcwd())
+import time
+import numpy as np
+import tensorflow as tf
+import matplotlib
 
 import tflib as lib
 import tflib.ops.linear
@@ -12,11 +14,7 @@ import tflib.save_images
 import tflib.mnist
 import tflib.plot
 
-import time
-import numpy as np
-import tensorflow as tf
-import matplotlib
-
+sys.path.append(os.getcwd())
 matplotlib.use('Agg')
 
 MODE = 'wgan-gp'
@@ -28,13 +26,13 @@ ITERS = 200000
 OUTPUT_DIM = 28 * 28
 NOISE_DIM = 128
 ROWS = 10
-STD = 0.001
+STD = 0.1
 
 lib.print_model_settings(locals().copy())
 
 
-def LeakyReLU(x, alpha=0.2):
-  return tf.maximum(alpha * x, x)
+def LeakyReLU(x, beta=0.2):
+  return tf.maximum(beta * x, x)
 
 
 def ReLULayer(name, n_in, n_out, inputs):
@@ -215,13 +213,23 @@ train_gen, dev_gen, test_gen = lib.mnist.load(BATCH_SIZE, BATCH_SIZE)
 
 def inf_train_gen():
   while True:
-    for images, targets in train_gen():
+    for images, targets in train_gen():  # targets are labels in range(10)
       yield images
 
 
 # For sampling around real images
 for images, targets in train_gen():
-  fixed_real_samples = images[:ROWS]
+  targets = targets.tolist()
+  indices = []
+  for label in range(10):
+    try:
+      indices.append(targets.index(label))
+    except IndexError:
+      break
+  if len(indices) == ROWS:
+    fixed_real_samples = images[indices]
+    break
+
 _, noise_mus = Discriminator(fixed_real_samples)
 
 
