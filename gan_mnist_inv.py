@@ -1,18 +1,19 @@
 import os
 import sys
 import time
+
+import matplotlib
 import numpy as np
 import tensorflow as tf
-import matplotlib
 
 import tflib as lib
-import tflib.ops.linear
-import tflib.ops.conv2d
-import tflib.ops.batchnorm
-import tflib.ops.deconv2d
-import tflib.save_images
 import tflib.mnist
+import tflib.ops.batchnorm
+import tflib.ops.conv2d
+import tflib.ops.deconv2d
+import tflib.ops.linear
 import tflib.plot
+import tflib.save_images
 
 sys.path.append(os.getcwd())
 matplotlib.use('Agg')
@@ -26,7 +27,7 @@ ITERS = 200000
 OUTPUT_DIM = 28 * 28
 NOISE_DIM = 128
 ROWS = 10
-STD = 0.1
+STD = 0.5
 
 lib.print_model_settings(locals().copy())
 
@@ -224,7 +225,7 @@ for images, targets in train_gen():
   for label in range(10):
     try:
       indices.append(targets.index(label))
-    except IndexError:
+    except ValueError:
       break
   if len(indices) == ROWS:
     fixed_real_samples = images[indices]
@@ -253,35 +254,44 @@ def sample_image(frame):
                               'samples/mnist/perturbation_{}.png'.format(frame))
 
 
-saver = tf.train.Saver()
+saver = tf.train.Saver(max_to_keep=1000)
 
 # Train loop
 with tf.Session() as session:
   session.run(tf.global_variables_initializer())
   gen = inf_train_gen()
+  if MODE == 'dcgan':
+    dis_iters = 1
+  else:
+    dis_iters = CRITIC_ITERS
 
   for iteration in xrange(ITERS):
     start_time = time.time()
-
     _input_noise = np.random.normal(size=(BATCH_SIZE, NOISE_DIM))
-    if iteration > 0:
+
+    if iteration < 100000:
+      _dis_cost = []
+      for i in xrange(dis_iters):
+        _data = gen.next()
+        _dis_cost_, _ = session.run([dis_cost, dis_train_op],
+                                    feed_dict={real_data: _data,
+                                               input_noise: _input_noise})
+        _dis_cost.append(_dis_cost_)
+        if clip_dis_weights:
+          _ = session.run(clip_dis_weights)
+      _dis_cost = np.mean(_dis_cost)
+
       _ = session.run(gen_train_op, feed_dict={input_noise: _input_noise})
       _inv_cost, _ = session.run([inv_cost, inv_train_op],
                                  feed_dict={input_noise: _input_noise})
-      lib.plot.plot('train invertor cost', _inv_cost)
-
-    if MODE == 'dcgan':
-      dis_iters = 1
     else:
-      dis_iters = CRITIC_ITERS
-    for i in xrange(dis_iters):
-      _data = gen.next()
-      _dis_cost, _ = session.run([dis_cost, dis_train_op],
-                                 feed_dict={real_data: _data,
-                                            input_noise: _input_noise})
-      if clip_dis_weights:
-        _ = session.run(clip_dis_weights)
+      _dis_cost = session.run(dis_cost, feed_dict={real_data: _data,
+                                                   input_noise: _input_noise})
+      _inv_cost, _ = session.run([inv_cost, inv_train_op],
+                                 feed_dict={input_noise: _input_noise})
+
     lib.plot.plot('train discriminator cost', _dis_cost)
+    lib.plot.plot('train invertor cost', _inv_cost)
     lib.plot.plot('time', time.time() - start_time)
 
     # Calculate dev loss and generate samples every 1000 iters
@@ -294,7 +304,7 @@ with tf.Session() as session:
         dev_dis_costs.append(_dev_dis_cost)
       lib.plot.plot('dev discriminator cost', np.mean(dev_dis_costs))
 
-      generate_image(iteration)
+      # generate_image(iteration)
       sample_image(iteration)
 
     # Save checkpoints every 10000 iters
