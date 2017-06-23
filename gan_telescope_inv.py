@@ -23,6 +23,7 @@ NOISE_DIM = 8
 OUTPUT_DIM = 10
 DIM = 10
 DATA_PATH = '../../Data/telescope'
+OUTPUT_PATH = os.getcwd().replace("Repositories", "Output")
 
 lib.print_model_settings(locals().copy())
 
@@ -114,8 +115,7 @@ inv_params = lib.params_with_name('Invertor')
 
 # Optimize cost function
 if MODE == 'wgan-gp':
-  inv_cost = tf.reduce_mean(
-    tf.reduce_sum(tf.square(input_noise - invert_noise), axis=1))
+  inv_cost = tf.reduce_mean(tf.square(input_noise - invert_noise))
   gen_cost = -tf.reduce_mean(dis_fake)
   dis_cost = tf.reduce_mean(dis_fake) - tf.reduce_mean(dis_real)
 
@@ -125,7 +125,7 @@ if MODE == 'wgan-gp':
   gradients = tf.gradients(Discriminator(interpolates)[0], [interpolates])[0]
   slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), axis=1))
   gradient_penalty = tf.reduce_mean((slopes - 1.) ** 2)
-  dis_cost += LAMBDA * gradient_penalty
+  dis_cost_gp = dis_cost + LAMBDA * gradient_penalty
 
   inv_train_op = tf.train.AdamOptimizer(learning_rate=1e-4, beta1=0.5,
                                         beta2=0.9).minimize(inv_cost,
@@ -134,7 +134,7 @@ if MODE == 'wgan-gp':
                                         beta2=0.9).minimize(gen_cost,
                                                             var_list=gen_params)
   dis_train_op = tf.train.AdamOptimizer(learning_rate=1e-4, beta1=0.5,
-                                        beta2=0.9).minimize(dis_cost,
+                                        beta2=0.9).minimize(dis_cost_gp,
                                                             var_list=dis_params)
   clip_dis_weights = None
 
@@ -143,43 +143,44 @@ fixed_noise = tf.constant(
   np.random.normal(size=(128, NOISE_DIM)).astype('float32'))
 fixed_noise_samples = Generator(128, noise=fixed_noise)
 
-saver = tf.train.Saver(max_to_keep=1000)
+if __name__ == '__main__':
+  saver = tf.train.Saver(max_to_keep=1000)
 
-# Train loop
-with tf.Session() as session:
-  session.run(tf.global_variables_initializer())
+  # Train loop
+  with tf.Session() as session:
+    session.run(tf.global_variables_initializer())
 
-  for iteration in xrange(ITERS):
-    start_time = time.time()
-    _input_noise = np.random.normal(size=(BATCH_SIZE, NOISE_DIM))
+    for iteration in xrange(ITERS):
+      start_time = time.time()
+      _input_noise = np.random.normal(size=(BATCH_SIZE, NOISE_DIM))
 
-    _dis_cost = []
-    for i in xrange(CRITIC_ITERS):
-      _data = inf_train_gen().next()
-      _dis_cost_, _ = session.run([dis_cost, dis_train_op],
-                                  feed_dict={real_data: _data,
-                                             input_noise: _input_noise})
-      _dis_cost.append(_dis_cost_)
-      if clip_dis_weights:
-        _ = session.run(clip_dis_weights)
-    _dis_cost = np.mean(_dis_cost)
+      _dis_cost = []
+      for i in xrange(CRITIC_ITERS):
+        _data = inf_train_gen().next()
+        _dis_cost_, _ = session.run([dis_cost, dis_train_op],
+                                    feed_dict={real_data: _data,
+                                               input_noise: _input_noise})
+        _dis_cost.append(_dis_cost_)
+        if clip_dis_weights:
+          _ = session.run(clip_dis_weights)
+      _dis_cost = np.mean(_dis_cost)
 
-    _ = session.run(gen_train_op, feed_dict={input_noise: _input_noise})
-    _inv_cost, _ = session.run([inv_cost, inv_train_op],
-                               feed_dict={input_noise: _input_noise})
+      _ = session.run(gen_train_op, feed_dict={input_noise: _input_noise})
+      _inv_cost, _ = session.run([inv_cost, inv_train_op],
+                                 feed_dict={input_noise: _input_noise})
 
-    lib.plot.plot('train discriminator cost', _dis_cost)
-    lib.plot.plot('train invertor cost', _inv_cost)
-    lib.plot.plot('time', time.time() - start_time)
+      lib.plot.plot('train discriminator cost', _dis_cost)
+      lib.plot.plot('train invertor cost', _inv_cost)
+      lib.plot.plot('time', time.time() - start_time)
 
-    if iteration % 1000 == 999:
-      test_dis_costs = []
-      for test_instances, _ in gen(X_test, y_test):
-        _test_dis_cost = session.run(dis_cost,
-                                     feed_dict={real_data: test_instances,
-                                                input_noise: _input_noise})
-        test_dis_costs.append(_test_dis_cost)
-      lib.plot.plot('test discriminator cost', np.mean(test_dis_costs))
-      lib.plot.flush()
+      if iteration % 1000 == 999:
+        test_dis_costs = []
+        for test_instances, _ in gen(X_test, y_test):
+          _test_dis_cost = session.run(dis_cost,
+                                       feed_dict={real_data: test_instances,
+                                                  input_noise: _input_noise})
+          test_dis_costs.append(_test_dis_cost)
+        lib.plot.plot('test discriminator cost', np.mean(test_dis_costs))
+        lib.plot.flush()
 
-    lib.plot.tick()
+      lib.plot.tick()

@@ -27,7 +27,8 @@ ITERS = 200000
 OUTPUT_DIM = 28 * 28
 NOISE_DIM = 128
 ROWS = 10
-STD = 0.5
+STD = 1.0
+OUTPUT_PATH = os.getcwd().replace("Repositories", "Output")
 
 lib.print_model_settings(locals().copy())
 
@@ -130,8 +131,7 @@ inv_params = lib.params_with_name('Invertor')
 
 # Optimize cost function
 if MODE == 'wgan':
-  inv_cost = tf.reduce_mean(
-    tf.reduce_sum(tf.square(input_noise - invert_noise), axis=1))
+  inv_cost = tf.reduce_mean(tf.square(input_noise - invert_noise))
   gen_cost = -tf.reduce_mean(dis_fake)
   dis_cost = tf.reduce_mean(dis_fake) - tf.reduce_mean(dis_real)
 
@@ -150,8 +150,7 @@ if MODE == 'wgan':
   clip_dis_weights = tf.group(*clip_ops)
 
 elif MODE == 'wgan-gp':
-  inv_cost = tf.reduce_mean(
-    tf.reduce_sum(tf.square(input_noise - invert_noise), axis=1))
+  inv_cost = tf.reduce_mean(tf.square(input_noise - invert_noise))
   gen_cost = -tf.reduce_mean(dis_fake)
   dis_cost = tf.reduce_mean(dis_fake) - tf.reduce_mean(dis_real)
 
@@ -161,7 +160,7 @@ elif MODE == 'wgan-gp':
   gradients = tf.gradients(Discriminator(interpolates)[0], [interpolates])[0]
   slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), axis=1))
   gradient_penalty = tf.reduce_mean((slopes - 1.) ** 2)
-  dis_cost += LAMBDA * gradient_penalty
+  dis_cost_gp = dis_cost + LAMBDA * gradient_penalty
 
   inv_train_op = tf.train.AdamOptimizer(learning_rate=1e-4, beta1=0.5,
                                         beta2=0.9).minimize(inv_cost,
@@ -170,13 +169,12 @@ elif MODE == 'wgan-gp':
                                         beta2=0.9).minimize(gen_cost,
                                                             var_list=gen_params)
   dis_train_op = tf.train.AdamOptimizer(learning_rate=1e-4, beta1=0.5,
-                                        beta2=0.9).minimize(dis_cost,
+                                        beta2=0.9).minimize(dis_cost_gp,
                                                             var_list=dis_params)
   clip_dis_weights = None
 
 elif MODE == 'dcgan':
-  inv_cost = tf.reduce_mean(
-    tf.reduce_sum(tf.square(input_noise - invert_noise), axis=1))
+  inv_cost = tf.reduce_mean(tf.square(input_noise - invert_noise))
   gen_cost = tf.reduce_mean(
     tf.nn.sigmoid_cross_entropy_with_logits(logits=dis_fake,
                                             labels=tf.ones_like(dis_fake)))
@@ -202,10 +200,11 @@ fixed_noise = tf.constant(
 fixed_noise_samples = Generator(128, noise=fixed_noise)
 
 
-def generate_image(frame):
+def generate_image(session, fixed_noise_samples, frame):
   samples = session.run(fixed_noise_samples)
-  lib.save_images.save_images(samples.reshape((128, 28, 28)),
-                              'samples/mnist/sample_{}.png'.format(frame))
+  lib.save_images.save_images(
+    samples.reshape((128, 28, 28)),
+    os.path.join(OUTPUT_PATH, 'samples/mnist/sample_{}.png'.format(frame)))
 
 
 # Dataset iterator
@@ -231,18 +230,17 @@ for images, targets in train_gen():
     fixed_real_samples = images[indices]
     break
 
-_, noise_mus = Discriminator(fixed_real_samples)
 
-
-def sample_image(frame):
+def sample_image(session, fixed_real_samples, frame):
+  _, noise_mus = Discriminator(fixed_real_samples)
   mus = session.run(noise_mus)
   extended_noise = []
+  delta_noise = np.random.multivariate_normal(mean=np.zeros_like(mus[0]),
+                                              cov=STD * np.identity(NOISE_DIM),
+                                              size=ROWS - 2)
   for k in xrange(ROWS):
     extended_noise.append(mus[k])
-    extended_noise.extend(np.random.multivariate_normal(mean=mus[k],
-                                                        cov=STD * np.identity(
-                                                          NOISE_DIM),
-                                                        size=ROWS - 2))
+    extended_noise.extend(delta_noise + mus[k])
   sampled_noise = tf.cast(tf.constant(np.asarray(extended_noise)), 'float32')
   sampled_noise_images = Generator(ROWS * (ROWS - 1), noise=sampled_noise)
   generated_noise_images = session.run(sampled_noise_images)
@@ -250,71 +248,73 @@ def sample_image(frame):
   for k in xrange(ROWS):
     samples.append(fixed_real_samples[k])
     samples.extend(generated_noise_images[k * (ROWS - 1):(k + 1) * (ROWS - 1)])
-  lib.save_images.save_images(np.reshape(samples, (ROWS * ROWS, 28, 28)),
-                              'samples/mnist/perturbation_{}.png'.format(frame))
+  lib.save_images.save_images(
+    np.reshape(samples, (ROWS * ROWS, 28, 28)), os.path.join(
+      OUTPUT_PATH, 'samples/mnist/perturbation_{}.png'.format(frame)))
 
 
-saver = tf.train.Saver(max_to_keep=1000)
+if __name__ == '__main__':
+  saver = tf.train.Saver(max_to_keep=1000)
 
-# Train loop
-with tf.Session() as session:
-  session.run(tf.global_variables_initializer())
-  gen = inf_train_gen()
-  if MODE == 'dcgan':
-    dis_iters = 1
-  else:
-    dis_iters = CRITIC_ITERS
-
-  for iteration in xrange(ITERS):
-    start_time = time.time()
-    _input_noise = np.random.normal(size=(BATCH_SIZE, NOISE_DIM))
-
-    if iteration < 100000:
-      _dis_cost = []
-      for i in xrange(dis_iters):
-        _data = gen.next()
-        _dis_cost_, _ = session.run([dis_cost, dis_train_op],
-                                    feed_dict={real_data: _data,
-                                               input_noise: _input_noise})
-        _dis_cost.append(_dis_cost_)
-        if clip_dis_weights:
-          _ = session.run(clip_dis_weights)
-      _dis_cost = np.mean(_dis_cost)
-
-      _ = session.run(gen_train_op, feed_dict={input_noise: _input_noise})
-      _inv_cost, _ = session.run([inv_cost, inv_train_op],
-                                 feed_dict={input_noise: _input_noise})
+  # Train loop
+  with tf.Session() as session:
+    session.run(tf.global_variables_initializer())
+    gen = inf_train_gen()
+    if MODE == 'dcgan':
+      dis_iters = 1
     else:
-      _dis_cost = session.run(dis_cost, feed_dict={real_data: _data,
-                                                   input_noise: _input_noise})
-      _inv_cost, _ = session.run([inv_cost, inv_train_op],
-                                 feed_dict={input_noise: _input_noise})
+      dis_iters = CRITIC_ITERS
 
-    lib.plot.plot('train discriminator cost', _dis_cost)
-    lib.plot.plot('train invertor cost', _inv_cost)
-    lib.plot.plot('time', time.time() - start_time)
+    for iteration in xrange(ITERS):
+      start_time = time.time()
+      _input_noise = np.random.normal(size=(BATCH_SIZE, NOISE_DIM))
 
-    # Calculate dev loss and generate samples every 1000 iters
-    if iteration % 1000 == 999:
-      dev_dis_costs = []
-      for images, _ in dev_gen():
-        _dev_dis_cost = session.run(dis_cost,
-                                    feed_dict={real_data: images,
-                                               input_noise: _input_noise})
-        dev_dis_costs.append(_dev_dis_cost)
-      lib.plot.plot('dev discriminator cost', np.mean(dev_dis_costs))
+      if iteration < 100000:
+        _dis_cost = []
+        for i in xrange(dis_iters):
+          _data = gen.next()
+          _dis_cost_, _ = session.run([dis_cost, dis_train_op],
+                                      feed_dict={real_data: _data,
+                                                 input_noise: _input_noise})
+          _dis_cost.append(_dis_cost_)
+          if clip_dis_weights:
+            _ = session.run(clip_dis_weights)
+        _dis_cost = np.mean(_dis_cost)
 
-      # generate_image(iteration)
-      sample_image(iteration)
+        _ = session.run(gen_train_op, feed_dict={input_noise: _input_noise})
+        _inv_cost, _ = session.run([inv_cost, inv_train_op],
+                                   feed_dict={input_noise: _input_noise})
+      else:
+        _dis_cost = session.run(dis_cost, feed_dict={real_data: _data,
+                                                     input_noise: _input_noise})
+        _inv_cost, _ = session.run([inv_cost, inv_train_op],
+                                   feed_dict={input_noise: _input_noise})
 
-    # Save checkpoints every 10000 iters
-    if iteration % 10000 == 9999:
-      save_path = saver.save(session,
-                             "models/mnist/model_{}.ckpt".format(iteration))
-      print("Model saved in file: %s" % save_path)
+      lib.plot.plot('train discriminator cost', _dis_cost)
+      lib.plot.plot('train invertor cost', _inv_cost)
+      lib.plot.plot('time', time.time() - start_time)
 
-    # Write logs every 100 iters
-    if iteration < 5 or iteration % 100 == 99:
-      lib.plot.flush()
+      # Calculate dev loss and generate samples every 1000 iters
+      if iteration % 1000 == 999:
+        dev_dis_costs = []
+        for images, _ in dev_gen():
+          _dev_dis_cost = session.run(dis_cost,
+                                      feed_dict={real_data: images,
+                                                 input_noise: _input_noise})
+          dev_dis_costs.append(_dev_dis_cost)
+        lib.plot.plot('dev discriminator cost', np.mean(dev_dis_costs))
 
-    lib.plot.tick()
+        generate_image(session, fixed_noise_samples, iteration)
+        sample_image(session, fixed_real_samples, iteration)
+
+      # Save checkpoints every 10000 iters
+      if iteration % 10000 == 9999:
+        save_path = saver.save(session, os.path.join(
+          OUTPUT_PATH, "models/mnist/model"), global_step=iteration)
+        print("Model saved in file: %s" % save_path)
+
+      # Write logs every 100 iters
+      if iteration < 5 or iteration % 100 == 99:
+        lib.plot.flush()
+
+      lib.plot.tick()
