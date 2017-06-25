@@ -15,6 +15,8 @@ import tflib.ops.linear
 import tflib.plot
 import tflib.save_images
 
+from parzen import *
+
 sys.path.append(os.getcwd())
 matplotlib.use('Agg')
 
@@ -49,7 +51,7 @@ def LeakyReLULayer(name, n_in, n_out, inputs):
   return LeakyReLU(output)
 
 
-def Generator(n_samples, noise):
+def Generator(n_samples, noise=None):
   if noise is None:
     noise = tf.random_normal([n_samples, NOISE_DIM])
 
@@ -256,6 +258,9 @@ def sample_image(session, fixed_real_samples, frame):
 if __name__ == '__main__':
   saver = tf.train.Saver(max_to_keep=1000)
 
+  # load data, dev and test
+  _, dev_data, test_data = lib.mnist.load_data()
+
   # Train loop
   with tf.Session() as session:
     session.run(tf.global_variables_initializer())
@@ -269,7 +274,7 @@ if __name__ == '__main__':
       start_time = time.time()
       _input_noise = np.random.normal(size=(BATCH_SIZE, NOISE_DIM))
 
-      if iteration < 100000:
+      if iteration < 200000:
         _dis_cost = []
         for i in xrange(dis_iters):
           _data = gen.next()
@@ -304,14 +309,31 @@ if __name__ == '__main__':
           dev_dis_costs.append(_dev_dis_cost)
         lib.plot.plot('dev discriminator cost', np.mean(dev_dis_costs))
 
-        generate_image(session, fixed_noise_samples, iteration)
+        # generate_image(session, fixed_noise_samples, iteration)
         sample_image(session, fixed_real_samples, iteration)
 
-      # Save checkpoints every 10000 iters
+      # Save checkpoints and evaluate model every 10000 iters
       if iteration % 10000 == 9999:
         save_path = saver.save(session, os.path.join(
           OUTPUT_PATH, "models/mnist/model"), global_step=iteration)
         print("Model saved in file: %s" % save_path)
+
+        # generate samples
+        gen_samples = Generator(NUM_SAMPLES).eval()
+
+        # cross validate sigma
+        sigma_range = np.logspace(-.9, -.5, 5)
+        sigma = cross_validate_sigma(gen_samples, dev_data[0], sigma_range,
+                                     BATCH_SIZE)
+        print "Using Sigma: {}".format(sigma)
+        lib.plot.plot('sigma', sigma)
+
+        # fit and evaulate
+        parzen = theano_parzen(gen_samples, sigma)
+        ll_mean, ll_std = get_nll(test_data[0], parzen, BATCH_SIZE)
+        ll_std /= np.sqrt(test_data[0].shape[0])
+        print "Log-Likelihood of test set = {}, se: {}".format(ll_mean, ll_std)
+        lib.plot.plot('test log likelihood', ll_mean)
 
       # Write logs every 100 iters
       if iteration < 5 or iteration % 100 == 99:
