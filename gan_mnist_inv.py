@@ -274,26 +274,20 @@ if __name__ == '__main__':
       start_time = time.time()
       _input_noise = np.random.normal(size=(BATCH_SIZE, NOISE_DIM))
 
-      if iteration < 200000:
-        _dis_cost = []
-        for i in xrange(dis_iters):
-          _data = gen.next()
-          _dis_cost_, _ = session.run([dis_cost, dis_train_op],
-                                      feed_dict={real_data: _data,
-                                                 input_noise: _input_noise})
-          _dis_cost.append(_dis_cost_)
-          if clip_dis_weights:
-            _ = session.run(clip_dis_weights)
-        _dis_cost = np.mean(_dis_cost)
+      _dis_cost = []
+      for i in xrange(dis_iters):
+        _data = gen.next()
+        _dis_cost_, _ = session.run([dis_cost, dis_train_op],
+                                    feed_dict={real_data: _data,
+                                               input_noise: _input_noise})
+        _dis_cost.append(_dis_cost_)
+        if clip_dis_weights:
+          _ = session.run(clip_dis_weights)
+      _dis_cost = np.mean(_dis_cost)
 
-        _ = session.run(gen_train_op, feed_dict={input_noise: _input_noise})
-        _inv_cost, _ = session.run([inv_cost, inv_train_op],
-                                   feed_dict={input_noise: _input_noise})
-      else:
-        _dis_cost = session.run(dis_cost, feed_dict={real_data: _data,
-                                                     input_noise: _input_noise})
-        _inv_cost, _ = session.run([inv_cost, inv_train_op],
-                                   feed_dict={input_noise: _input_noise})
+      _ = session.run(gen_train_op, feed_dict={input_noise: _input_noise})
+      _inv_cost, _ = session.run([inv_cost, inv_train_op],
+                                 feed_dict={input_noise: _input_noise})
 
       lib.plot.plot('train discriminator cost', _dis_cost)
       lib.plot.plot('train invertor cost', _inv_cost)
@@ -322,11 +316,13 @@ if __name__ == '__main__':
         gen_samples = Generator(NUM_SAMPLES).eval()
 
         # cross validate sigma
-        sigma_range = np.logspace(-.9, -.5, 5)
-        sigma = cross_validate_sigma(gen_samples, dev_data[0], sigma_range,
-                                     BATCH_SIZE)
-        print "Using Sigma: {}".format(sigma)
-        lib.plot.plot('sigma', sigma)
+        # sigma_range = np.logspace(-.9, -.5, 5)
+        # sigma = cross_validate_sigma(gen_samples, dev_data[0], sigma_range,
+        #                              BATCH_SIZE)
+        # print "Using Sigma: {}".format(sigma)
+        # lib.plot.plot('sigma', sigma)
+
+        sigma = 0.2
 
         # fit and evaulate
         parzen = theano_parzen(gen_samples, sigma)

@@ -11,6 +11,8 @@ import tflib as lib
 import tflib.ops.linear
 import tflib.plot
 
+from parzen import *
+
 sys.path.append(os.getcwd())
 matplotlib.use('Agg')
 
@@ -22,6 +24,7 @@ ITERS = 200000
 NOISE_DIM = 8
 OUTPUT_DIM = 10
 DIM = 10
+STD = 0.2
 DATA_PATH = '../../Data/telescope'
 OUTPUT_PATH = os.getcwd().replace("Repositories", "Output")
 
@@ -41,10 +44,13 @@ data = scaler.transform(data)
 le = sklearn.preprocessing.LabelEncoder().fit(labels)
 labels = le.transform(labels)
 # prepare data batches
-X_train = data[:16000].reshape(-1, BATCH_SIZE, OUTPUT_DIM)
+X_train = data[:15000].reshape(-1, BATCH_SIZE, OUTPUT_DIM)
+X_dev = data[15000:16000].reshape(-1, OUTPUT_DIM)
 X_test = data[16000:19000].reshape(-1, BATCH_SIZE, OUTPUT_DIM)
-y_train = labels[:16000].reshape(-1, BATCH_SIZE)
+y_train = labels[:15000].reshape(-1, BATCH_SIZE)
+y_dev = labels[15000:16000].reshape(-1)
 y_test = labels[16000:19000].reshape(-1, BATCH_SIZE)
+test_data = X_test.copy().reshape(-1, OUTPUT_DIM)
 print "Finish loading MAGIC Gamma Telescope Data Set."
 
 
@@ -75,7 +81,7 @@ def LeakyReLULayer(name, n_in, n_out, inputs):
   return LeakyReLU(output)
 
 
-def Generator(n_samples, noise):
+def Generator(n_samples, noise=None):
   if noise is None:
     noise = tf.random_normal([n_samples, NOISE_DIM])
 
@@ -102,11 +108,11 @@ def Discriminator(inputs):
 
 
 # Build graph
-real_data = tf.placeholder(tf.float32, shape=[BATCH_SIZE, OUTPUT_DIM])
-input_noise = tf.placeholder(tf.float32, shape=[BATCH_SIZE, NOISE_DIM])
+real_data = tf.placeholder(tf.float32, shape=[None, OUTPUT_DIM])
+input_noise = tf.placeholder(tf.float32, shape=[None, NOISE_DIM])
 fake_data = Generator(BATCH_SIZE, input_noise)
 
-dis_real, _ = Discriminator(real_data)
+dis_real, real_noise = Discriminator(real_data)
 dis_fake, invert_noise = Discriminator(fake_data)
 
 gen_params = lib.params_with_name('Generator')
@@ -137,6 +143,16 @@ if MODE == 'wgan-gp':
                                         beta2=0.9).minimize(dis_cost_gp,
                                                             var_list=dis_params)
   clip_dis_weights = None
+
+# sample with Generator
+def sample_generator(session, data_row, num_samples):
+  noise_mu = session.run(real_noise, feed_dict={real_data: data_row})
+  noise_samples = np.random.multivariate_normal(mean=noise_mu.ravel(),
+                                                cov=STD*np.identity(NOISE_DIM),
+                                                size=num_samples-1)
+  perturbations = session.run(fake_data, feed_dict={input_noise: noise_samples})
+  return np.vstack((data_row, perturbations))
+
 
 # For saving samples
 fixed_noise = tf.constant(
@@ -181,6 +197,32 @@ if __name__ == '__main__':
                                                   input_noise: _input_noise})
           test_dis_costs.append(_test_dis_cost)
         lib.plot.plot('test discriminator cost', np.mean(test_dis_costs))
+
+      # Save checkpoints and evaluate model every 10000 iters
+      if iteration % 10000 == 9999:
+        save_path = saver.save(session, os.path.join(
+        OUTPUT_PATH, "models/telescope/model"), global_step=iteration)
+        print("Model saved in file: %s" % save_path)
+
+        # generate samples
+        gen_samples = Generator(NUM_SAMPLES).eval()
+
+        # cross validate sigma
+        sigma_range = np.logspace(-.9, -.5, 5)
+        sigma = cross_validate_sigma(gen_samples, X_dev, sigma_range,
+                                     BATCH_SIZE)
+        print "Using Sigma: {}".format(sigma)
+        lib.plot.plot('sigma', sigma)
+
+        # fit and evaulate
+        parzen = theano_parzen(gen_samples, sigma)
+        ll_mean, ll_std = get_nll(test_data, parzen, BATCH_SIZE)
+        ll_std /= np.sqrt(X_test.shape[0])
+        print "Log-Likelihood of test set = {}, se: {}".format(ll_mean, ll_std)
+        lib.plot.plot('test log likelihood', ll_mean)
+
+      # Write logs every 100 iters
+      if iteration < 5 or iteration % 100 == 99:
         lib.plot.flush()
 
       lib.plot.tick()
