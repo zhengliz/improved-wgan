@@ -184,21 +184,34 @@ def GoodDiscriminator(inputs, dim=DIM):
 
 class Imagenet64WGAN():
     def __init__(self):
+
         self.all_real_data_conv = tf.placeholder(tf.int32, shape=[BATCH_SIZE, 3, 64, 64])
         split_real_data_conv = tf.split(self.all_real_data_conv, len(DEVICES))
 
-        gen_costs, dis_costs = [], []
+        self.all_input_noise = tf.placeholder(tf.float32, shape=[BATCH_SIZE, NOISE_DIM])
+        split_input_noise = tf.split(self.all_input_noise, len(DEVICES))
 
-        for device_index, (device, real_data_conv) in enumerate(zip(DEVICES, split_real_data_conv)):
+        inv_costs, gen_costs, dis_costs = [], [], []
+
+        for device_index, device in enumerate(DEVICES):
+            real_data_conv = split_real_data_conv[device_index]
+            input_noise = split_input_noise[device_index]
+
             with tf.device(device):
                 real_data = tf.reshape(
                     2 * ((tf.cast(real_data_conv, tf.float32) / 255.) - .5),
                     [BATCH_SIZE / len(DEVICES), OUTPUT_DIM])
-                fake_data = self.generate(BATCH_SIZE / len(DEVICES))
+                fake_data = self.generate(BATCH_SIZE / len(DEVICES), input_noise)
 
-                dis_real = self.discriminate(real_data)
-                dis_fake = self.discriminate(fake_data)
+                dis_real, real_noise = self.discriminate(real_data)
+                dis_fake, invert_noise = self.discriminate(fake_data)
 
+                real_data_rec = self.generate(BATCH_SIZE / len(DEVICES), real_noise)
+
+                inv_cost = tf.reduce_mean(
+                    tf.square(input_noise - invert_noise))
+                inv_cost += tf.reduce_mean(
+                    tf.square(real_data - real_data_rec))
                 gen_cost = -tf.reduce_mean(dis_fake)
                 dis_cost = tf.reduce_mean(dis_fake) - tf.reduce_mean(dis_real)
 
@@ -206,26 +219,38 @@ class Imagenet64WGAN():
                                           minval=0., maxval=1.)
                 differences = fake_data - real_data
                 interpolates = real_data + alpha * differences
-                gradients = tf.gradients(self.discriminate(interpolates),
+                gradients = tf.gradients(self.discriminate(interpolates)[0],
                                          [interpolates])[0]
                 slopes = tf.sqrt(tf.reduce_sum(tf.square(gradients), axis=[1]))
                 gradient_penalty = tf.reduce_mean((slopes - 1.) ** 2)
                 dis_cost += LAMBDA * gradient_penalty
 
+                inv_costs.append(inv_cost)
                 gen_costs.append(gen_cost)
                 dis_costs.append(dis_cost)
 
+        self.inv_cost = tf.add_n(inv_costs) / len(DEVICES)
         self.gen_cost = tf.add_n(gen_costs) / len(DEVICES)
         self.dis_cost = tf.add_n(dis_costs) / len(DEVICES)
 
+
+        self.inv_train_op = tf.train.AdamOptimizer(
+            learning_rate=1e-4, beta1=0., beta2=0.9).minimize(
+            self.inv_cost, var_list=lib.params_with_name('Inverter'),
+            colocate_gradients_with_ops=True)
         self.gen_train_op = tf.train.AdamOptimizer(
             learning_rate=1e-4, beta1=0., beta2=0.9).minimize(
             self.gen_cost, var_list=lib.params_with_name('Generator'),
             colocate_gradients_with_ops=True)
         self.dis_train_op = tf.train.AdamOptimizer(
             learning_rate=1e-4, beta1=0., beta2=0.9).minimize(
-            self.dis_cost, var_list=lib.params_with_name('Discriminator.'),
+            self.dis_cost, var_list=lib.params_with_name('Discriminator'),
             colocate_gradients_with_ops=True)
+
+        # For generating samples
+        self.all_images_conv = None
+        self.fixed_noise = tf.constant(
+            np.random.normal(size=(BATCH_SIZE, NOISE_DIM)).astype('float32'))
 
 
     def generate(self, n_samples, noise=None):
@@ -268,50 +293,96 @@ class Imagenet64WGAN():
                                output, resample='down')
 
         output = tf.reshape(output, [-1, 4 * 4 * 8 * DIM])
-        output = lib.ops.linear.Linear('Discriminator.Output', 4 * 4 * 8 * DIM,
-                                       1, output)
 
-        return tf.reshape(output, [-1])
+        discriminator_output = lib.ops.linear.Linear(
+            'Discriminator.Output', 4 * 4 * 8 * DIM, 1, output)
+        discriminator_output = tf.reshape(discriminator_output, [-1])
+
+        inverter_output = lib.ops.linear.Linear('Inverter.5', 4 * 4 * 8 * DIM,
+                                                4 * 4 * DIM, output)
+        inverter_output = LeakyReLU(inverter_output)
+
+        inverter_output = lib.ops.linear.Linear('Inverter.6', 4 * 4 * DIM,
+                                                4 * NOISE_DIM, inverter_output)
+        inverter_output = LeakyReLU(inverter_output)
+
+        inverter_output = lib.ops.linear.Linear('Inverter.Output', 4 * NOISE_DIM,
+                                                NOISE_DIM, inverter_output)
+        inverter_output = tf.reshape(inverter_output, [-1, NOISE_DIM])
+
+        return discriminator_output, inverter_output
 
 
-    def train_gen(self, session):
-        _ = session.run(self.gen_train_op)
-        # to do: add input noise
+    def train_gen(self, session, _input_noise):
+        _ = session.run(self.gen_train_op,
+                        feed_dict={self.all_input_noise: _input_noise})
 
 
-    def train_dis(self, session, _data):
+    def train_dis(self, session, _data, _input_noise):
         _dis_cost, _ = session.run([self.dis_cost, self.dis_train_op],
-                                   feed_dict={self.all_real_data_conv: _data})
+                                   feed_dict={self.all_real_data_conv: _data,
+                                              self.all_input_noise: _input_noise})
         return _dis_cost
 
 
-    def train_inv(self):
-        pass
+    def train_inv(self, session, _data, _input_noise):
+        if self.all_images_conv is None:
+            self.all_images_conv = _data.copy()
+        _inv_cost, _ = session.run([self.inv_cost, self.inv_train_op],
+                                   feed_dict={self.all_real_data_conv: _data,
+                                              self.all_input_noise: _input_noise})
+        return _inv_cost
 
 
     def generate_from_fixed_noise(self, session, frame):
-        # For generating samples
-        fixed_noise = tf.constant(
-            np.random.normal(size=(BATCH_SIZE, NOISE_DIM)).astype('float32'))
         all_fixed_noise_samples = []
         for device_index, device in enumerate(DEVICES):
             n_samples = BATCH_SIZE / len(DEVICES)
             all_fixed_noise_samples.append(
-                self.generate(n_samples,
-                              noise=fixed_noise[device_index*n_samples:(device_index+1)*n_samples]))
-
+                self.generate(
+                    n_samples,
+                    noise=self.fixed_noise[device_index*n_samples:(device_index+1)*n_samples]))
         all_fixed_noise_samples = tf.concat(all_fixed_noise_samples, axis=0)
 
         samples = session.run(all_fixed_noise_samples)
-        samples = ((samples+1.)*(255.99/2)).astype('int32')
-        lib.save_images.save_images(samples.reshape((BATCH_SIZE, 3, 64, 64)),
-                                    os.path.join(OUTPUT_PATH, 'imagenet64/samples_{}.png'.format(frame)))
+        samples = ((samples + 1.) * (255. / 2)).astype('int32')
+        lib.save_images.save_images(
+            samples.reshape((BATCH_SIZE, 3, 64, 64)),
+            os.path.join(OUTPUT_PATH,
+                         'samples/imagenet64/samples_{}.png'.format(frame)))
 
         return samples
 
 
     def generate_from_fixed_images(self, session, frame):
-        pass
+        all_images = self.all_images_conv.copy()
+        all_fixed_images_samples = []
+        split_images_conv = tf.split(all_images, len(DEVICES))
+
+        for device, images_conv in zip(DEVICES, split_images_conv):
+
+            with tf.device(device):
+                images = tf.reshape(
+                    2 * ((tf.cast(images_conv, tf.float32) / 255.) - .5),
+                    [BATCH_SIZE / len(DEVICES), OUTPUT_DIM])
+                _, real_noise = self.discriminate(images)
+                images_rec = self.generate(BATCH_SIZE / len(DEVICES), real_noise)
+                all_fixed_images_samples.append(images_rec)
+        all_fixed_images_samples = tf.concat(all_fixed_images_samples, axis=0)
+
+        all_images_rec = session.run(all_fixed_images_samples)
+        all_images_rec = ((all_images_rec + 1.) * (255. / 2)).astype('int32')
+
+        samples = np.zeros((BATCH_SIZE * 2, OUTPUT_DIM), dtype=int)
+        for i in range(BATCH_SIZE * 2):
+            if i & 1:
+                samples[i] = all_images_rec[i / 2]
+            else:
+                samples[i] = all_images[i / 2].reshape(-1)
+        lib.save_images.save_images(
+            samples.reshape((BATCH_SIZE * 2, 3, 64, 64)),
+            os.path.join(OUTPUT_PATH,
+                         'samples/imagenet64/rec_{}.png'.format(frame)))
 
 
 if __name__ == '__main__':
@@ -332,38 +403,54 @@ if __name__ == '__main__':
         #     os.path.join(OUTPUT_PATH, 'imagenet64/samples_groundtruth.png'))
 
 
+        writer = tf.summary.FileWriter(
+            os.path.join(OUTPUT_PATH, 'graphs/imagenet64'), session.graph)
+
         # Train loop
         session.run(tf.global_variables_initializer())
         gen = inf_train_gen()
         for iteration in xrange(ITERS):
 
             start_time = time.time()
+            input_noise = np.random.normal(size=(BATCH_SIZE, NOISE_DIM))
+
+            dis_iters = CRITIC_ITERS
+            dis_cost, inv_cost = [], []
+            for i in xrange(dis_iters):
+                _data = gen.next()
+                dis_cost.append(imagenet64Wgan.train_dis(session, _data, input_noise))
+                inv_cost.append(imagenet64Wgan.train_inv(session, _data, input_noise))
 
             # Train generator
             if iteration > 0:
-                imagenet64Wgan.train_gen(session)
+                imagenet64Wgan.train_gen(session, input_noise)
 
-            dis_iters = CRITIC_ITERS
-            for i in xrange(dis_iters):
-                _data = gen.next()
-                _dis_cost = imagenet64Wgan.train_dis(session, _data)
-
-            lib.plot.plot('train disc cost', _dis_cost)
+            lib.plot.plot('train dis cost', np.mean(dis_cost))
+            lib.plot.plot('train inv cost', np.mean(inv_cost))
             lib.plot.plot('time', time.time() - start_time)
 
-            if iteration % 200 == 198:
-                t = time.time()
+            if iteration % 1000 == 999:
                 dev_dis_costs = []
                 for (images,) in dev_gen():
                     _dev_dis_cost = session.run(
                         imagenet64Wgan.dis_cost,
-                        feed_dict={imagenet64Wgan.all_real_data_conv: images})
+                        feed_dict={imagenet64Wgan.all_real_data_conv: images,
+                                   imagenet64Wgan.all_input_noise: input_noise})
                     dev_dis_costs.append(_dev_dis_cost)
                 lib.plot.plot('dev disc cost', np.mean(dev_dis_costs))
 
                 imagenet64Wgan.generate_from_fixed_noise(session, iteration)
+                imagenet64Wgan.generate_from_fixed_images(session, iteration)
+
+            if iteration % 5000 == 4999:
+                save_path = saver.save(
+                    session, os.path.join(OUTPUT_PATH, 'models/imagenet64/model'),
+                    global_step=iteration)
+                print "Model saved in file: {}".format(save_path)
 
             if (iteration < 5) or (iteration % 200 == 199):
                 lib.plot.flush()
 
             lib.plot.tick()
+
+    writer.close()

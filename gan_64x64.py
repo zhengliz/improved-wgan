@@ -20,9 +20,10 @@ import tflib.plot
 
 # Download 64x64 ImageNet at http://image-net.org/small/download.php and
 # fill in the path to the extracted files here!
-DATA_DIR = '/home/zhengliz/Data/imagenet'
+DATA_DIR = '/home/zhengliz/Data/imagenet64'
 if len(DATA_DIR) == 0:
     raise Exception('Please specify path to data directory in gan_64x64.py!')
+OUTPUT_PATH = os.getcwd().replace("Repositories", "Output")
 
 MODE = 'wgan-gp' # dcgan, wgan, wgan-gp, lsgan
 DIM = 64 # Model dimensionality
@@ -572,7 +573,8 @@ with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as session:
     def generate_image(iteration):
         samples = session.run(all_fixed_noise_samples)
         samples = ((samples+1.)*(255.99/2)).astype('int32')
-        lib.save_images.save_images(samples.reshape((BATCH_SIZE, 3, 64, 64)), 'samples_{}.png'.format(iteration))
+        lib.save_images.save_images(samples.reshape((BATCH_SIZE, 3, 64, 64)),
+                                    os.path.join(OUTPUT_PATH, 'samples/imagenet64/samples_{}.png'.format(iteration)))
 
 
     # Dataset iterator
@@ -587,11 +589,12 @@ with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as session:
     _x = inf_train_gen().next()
     _x_r = session.run(real_data, feed_dict={real_data_conv: _x[:BATCH_SIZE/N_GPUS]})
     _x_r = ((_x_r+1.)*(255.99/2)).astype('int32')
-    lib.save_images.save_images(_x_r.reshape((BATCH_SIZE/N_GPUS, 3, 64, 64)), 'samples_groundtruth.png')
+    lib.save_images.save_images(_x_r.reshape((BATCH_SIZE/N_GPUS, 3, 64, 64)),
+                                os.path.join(OUTPUT_PATH, 'samples/imagenet64/samples_groundtruth.png'))
 
 
     # Train loop
-    session.run(tf.initialize_all_variables())
+    session.run(tf.global_variables_initializer())
     gen = inf_train_gen()
     for iteration in xrange(ITERS):
 
