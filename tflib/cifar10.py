@@ -39,3 +39,19 @@ def load(batch_size, data_dir):
         cifar_generator(['data_batch_1','data_batch_2','data_batch_3','data_batch_4','data_batch_5'], batch_size, data_dir), 
         cifar_generator(['test_batch'], batch_size, data_dir)
     )
+
+
+def load_data(data_dir):
+    all_X = []
+    all_Y = []
+    filenames = ['data_batch_1','data_batch_2','data_batch_3','data_batch_4','data_batch_5']
+    for filename in filenames:
+        data, labels = unpickle(data_dir + '/' + filename)
+        all_X.append(data)
+        all_Y.append(labels)
+    X = np.concatenate(all_X, axis=0)
+    Y = np.concatenate(all_Y, axis=0)
+
+    X_test, Y_test = unpickle(data_dir + '/' + 'test_batch')
+
+    return (X, Y), (X_test, Y_test)
